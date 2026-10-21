@@ -11,7 +11,6 @@ function localData(){
   catch { return {}; }
 }
 async function post(path, body){
-  if(path === '/api/refresh') return {ok:true};
   const local = localData();
   if(path === '/api/watch') local.watch = body.words;
   if(path === '/api/article') {
@@ -46,10 +45,26 @@ function exportBrief(){
   download(lines.join('\n'),'erzurum-gunluk-brifing.md','text/markdown;charset=utf-8');
 }
 function matches(article){return state.watch.filter(w=>fold(article.title).includes(fold(w)));}
-async function load(){
+let loadSequence = 0;
+const refreshStatus = document.createElement('p');
+refreshStatus.id='refresh-status';
+refreshStatus.setAttribute('role','status');
+refreshStatus.style.cssText='font-size:13px;color:#526477;margin:8px 0 16px';
+$('notice').after(refreshStatus);
+$('refresh').title='Son yayımlanan listeyi kontrol eder. Günlük haber taraması Türkiye saatiyle 08.00 için planlanır.';
+async function load(manual=false){
+  manual=manual===true;
+  const sequence=++loadSequence, controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),15000);
+  const previous=archive;
+  clearTimeout(polling);
+  $('refresh').disabled=true;
+  $('refresh').textContent='↻ Yenileniyor…';
+  if(manual)refreshStatus.textContent='Yayımlanan son haber listesi kontrol ediliyor…';
   try{
-    const response=await fetch('./news.json', {cache:'no-store'}); if(!response.ok)throw Error('Haber dosyasına erişilemiyor');
+    const response=await fetch('./news.json'+(manual?'?check='+Date.now():''), {cache:'no-store',signal:controller.signal}); if(!response.ok)throw Error('Haber dosyasına erişilemiyor');
     const incoming=await response.json();
+    if(sequence!==loadSequence)return false;
     if(!Array.isArray(incoming.articles)||!Array.isArray(incoming.categories)||!Array.isArray(incoming.districts))throw Error('Geçersiz haber dosyası');
     archive=incoming;
     const local=localData(), cutoff=Date.now()-Number($('period').value)*3600000;
@@ -59,13 +74,27 @@ async function load(){
     $('total').textContent=state.articles.length;$('nav-count').textContent=state.articles.length;$('source-count').textContent=new Set(state.articles.map(a=>a.source)).size;$('watch-count').textContent=state.articles.filter(a=>matches(a).length).length;
     const run=state.last_run;$('last-time').textContent=run?new Date(run.at).toLocaleTimeString('tr-TR',{timeZone:'Europe/Istanbul',hour:'2-digit',minute:'2-digit'}):'Henüz yok';
     $('health').textContent=run?date(run.at)+' · '+run.success+'/'+run.total+' akış':'İlk tarama bekleniyor';
-    $('refresh').disabled=state.busy;$('refresh').textContent=state.busy?'↻ Taranıyor…':'↻ Listeyi yenile';
     $('notice').classList.toggle('error',Boolean(run && run.success<run.total));
     $('notice').textContent=state.busy?'Kaynaklar taranıyor. Tamamlandığında liste otomatik yenilenir.':!run?'İlk tarama hazırlanıyor.':run.success===0?'Haber akışlarına erişilemedi. Mevcut arşiv gösteriliyor; internet bağlantısını ve Kaynaklar bölümünü kontrol edin.':`${run.success}/${run.total} akış erişilebilir. ${run.new} yeni kayıt eklendi. Konu ve ilçe etiketleri başlıktan otomatik çıkarılır.`;
     if(!archive.last_success || Date.now()-Date.parse(archive.last_success)>36*3600000){$('notice').classList.add('error');$('notice').textContent='Haberler güncel olmayabilir. Son başarılı tarama: '+(archive.last_success?date(archive.last_success):'bilinmiyor')+'. Mevcut arşiv gösteriliyor.';}
     if(state.unknown_dates)$('notice').textContent+=` Tarihi okunamayan ${state.unknown_dates} kayıt dönem listelerine alınmadı.`;
-    render();clearTimeout(polling);polling=setTimeout(load,state.busy?1800:30000);
-  }catch(e){$('refresh').disabled=false;$('notice').classList.add('error');$('notice').textContent='Haber dosyası alınamadı. İnternet bağlantınızı kontrol edip Listeyi yenile düğmesini deneyin. Varsa önceki liste ekranda korunur.';clearTimeout(polling);polling=setTimeout(load,10000);}
+    render();
+    if(manual){
+      const changed=!previous || JSON.stringify(previous)!==JSON.stringify(incoming);
+      refreshStatus.textContent=(changed?'Son yayımlanan liste alındı.':'Kontrol edildi; yeni yayımlanmış veri yok.')+' Son kontrol: '+new Date().toLocaleTimeString('tr-TR',{timeZone:'Europe/Istanbul'})+'. Haber taraması her gün 08.00 için planlanır; gecikebilir.';
+    }
+    polling=setTimeout(load,30000);
+    return true;
+  }catch(e){
+    if(sequence!==loadSequence)return false;
+    $('notice').classList.add('error');$('notice').textContent='Haber dosyası alınamadı. İnternet bağlantınızı kontrol edip Listeyi yenile düğmesini deneyin. Varsa önceki liste ekranda korunur.';
+    refreshStatus.textContent=e.name==='AbortError'?'Yenileme zaman aşımına uğradı. Tekrar deneyebilirsiniz.':'Yenileme başarısız. Tekrar deneyebilirsiniz.';
+    polling=setTimeout(load,10000);
+    return false;
+  }finally{
+    clearTimeout(timeout);
+    if(sequence===loadSequence){$('refresh').disabled=false;$('refresh').textContent='↻ Listeyi yenile';}
+  }
 }
 function render(){
   if(!state)return;
@@ -89,7 +118,7 @@ $('today').textContent=new Date().toLocaleDateString('tr-TR',{timeZone:'Europe/I
 for(const id of ['search','district','category','dedup','hide-weather'])$(id).addEventListener(id==='search'?'input':'change',render);
 $('period').addEventListener('change',load);
 document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;document.querySelectorAll('[data-view]').forEach(x=>x.classList.toggle('active',x===b));render();}));
-$('refresh').addEventListener('click',async()=>{try{$('refresh').disabled=true;await post('/api/refresh',{});await load();}catch(e){toast(e.message);$('refresh').disabled=false;}});
+$('refresh').addEventListener('click',()=>load(true));
 $('save-watch').addEventListener('click',async()=>{try{const words=[...new Set($('watch-input').value.split(',').map(w=>w.trim()).filter(Boolean))];if(words.length>30||words.some(w=>w.length>60))return toast('En fazla 30 kelime; her biri en fazla 60 karakter olmalı.');await post('/api/watch',{words});await load();toast('Takip listeniz kaydedildi.');}catch(e){toast(e.message);}});
 $('export').addEventListener('click',()=>{if(state)exportCsv();});
 $('brief-download').addEventListener('click',e=>{e.preventDefault();if(archive)exportBrief();});
