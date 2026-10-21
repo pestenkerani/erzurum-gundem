@@ -96,6 +96,27 @@ async function load(manual=false){
     if(sequence===loadSequence){$('refresh').disabled=false;$('refresh').textContent='↻ Listeyi yenile';}
   }
 }
+const dayKey = value => new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Istanbul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(value));
+function dayLabel(key){
+  const today=dayKey(new Date());
+  const yesterday=dayKey(new Date(Date.parse(today+'T12:00:00+03:00')-86400000));
+  if(key===today)return 'Bugün';
+  if(key===yesterday)return 'Dün';
+  return new Date(key+'T12:00:00+03:00').toLocaleDateString('tr-TR',{timeZone:'Europe/Istanbul',day:'numeric',month:'long',year:'numeric',weekday:'long'});
+}
+function groupDays(groups){
+  const days=new Map();
+  for(const group of [...groups].sort((a,b)=>Date.parse(b[0].published)-Date.parse(a[0].published))){
+    const key=dayKey(group[0].published);
+    if(!days.has(key))days.set(key,[]);
+    days.get(key).push(group);
+  }
+  return days;
+}
+let dayViewSignature='', dayOpen=new Map(), dayLimits=new Map();
+const dayStyles=document.createElement('style');
+dayStyles.textContent='.news-day{margin:0 0 14px}.news-day>summary{cursor:pointer;padding:15px 16px;border:1px solid var(--line);border-radius:9px;background:#edf3e8;color:var(--green);font-weight:650;font-size:15px}.news-day>summary span{font-size:12px;font-weight:400;margin-left:10px}.news-day[open]>summary{margin-bottom:12px}.day-more{width:100%;margin:0 0 12px}.day-progress{color:var(--muted);font-size:12px;margin:8px 0}';
+document.head.append(dayStyles);
 function render(){
   if(!state)return;
   $('view-title').textContent=({all:'Haber akışı',watch:'Takip ettiklerim',saved:'Kaydedilenler',sources:'Kaynaklar ve durum'})[view];
@@ -106,14 +127,33 @@ function render(){
   }
   const q=fold($('search').value), district=$('district').value, category=$('category').value;
   let rows=state.articles.filter(a=>(view!=='saved'||a.saved)&&(view!=='watch'||matches(a).length)&&(!$('hide-weather').checked||a.category!=='Hava durumu')&&(!district||a.districts.includes(district))&&(!category||a.category===category)&&(!q||fold(a.title+' '+a.source+' '+a.note).includes(q)));
+  rows.sort((a,b)=>Date.parse(b.published)-Date.parse(a.published));
   const groups=new Map(); for(const a of rows){const key=$('dedup').checked?fold(a.title):a.id;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(a);}
   $('result-count').textContent=groups.size+' başlık · '+rows.length+' kayıt';
   if(!rows.length){$('articles').innerHTML='<div class="empty"><span style="font-size:32px">◎</span><h3>'+ (state.busy?'Haberler toplanıyor…':'Bu görünümde haber yok')+'</h3><p>'+(view==='saved'?'Bir haberdeki yıldız düğmesine basarak çalışma listenize ekleyin.':view==='watch'?'Takip kelimelerinizi düzenleyin veya zaman aralığını genişletin.':'Zaman aralığını genişletin, filtreleri temizleyin veya haberleri yeniden tarayın.')+'</p><p>Boş sonuç, kentte haber olmadığı anlamına gelmez.</p></div>';return;}
-  $('articles').innerHTML=[...groups.values()].map(group=>{
+  const signature=JSON.stringify([view,q,district,category,$('period').value,$('dedup').checked,$('hide-weather').checked,state.watch]);
+  if(signature!==dayViewSignature){dayOpen.clear();dayLimits.clear();dayViewSignature=signature;}
+  else document.querySelectorAll('details[data-day]').forEach(el=>dayOpen.set(el.dataset.day,el.open));
+  const card=group=>{
     const a=group[0], hit=matches(a);
     return `<article class="card"><div class="card-top"><span class="tag">${esc(a.category)}</span><span class="district">${esc(a.districts.join(' · '))}</span>${hit.length?'<span class="tag matched">◎ '+esc(hit.join(', '))+'</span>':''}</div><h3><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a></h3><div class="meta"><strong>${esc(a.source)}</strong><span>·</span><time>${date(a.published)}</time></div>${group.length>1?'<div class="duplicates">Diğer yayınlar: '+group.slice(1).map(r=>`<a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.source)}</a>`).join('')+'</div>':''}${a.note?'<p class="user-note">'+esc(a.note)+'</p>':''}<div class="card-bottom"><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">Kaynağında oku ↗</a><button data-note="${a.id}">✎ Not ekle</button><button data-save="${a.id}" aria-label="${a.saved?'Kaydı kaldır':'Haberi kaydet'}">${a.saved?'★ Kaydedildi':'☆ Kaydet'}</button></div></article>`;
+  };
+  const days=groupDays(groups.values());
+  $('articles').innerHTML=[...days].map(([key,items],index)=>{
+    const limit=dayLimits.get(key)||10;
+    const open=dayOpen.has(key)?dayOpen.get(key):index===0;
+    const shown=Math.min(limit,items.length), remaining=items.length-shown;
+    return `<details class="news-day" data-day="${key}" ${open?'open':''}><summary>${esc(dayLabel(key))}<span>${items.length} başlık</span></summary>${items.slice(0,limit).map(card).join('')}<p class="day-progress" id="day-progress-${key}" tabindex="-1">${items.length} başlıktan ${shown} tanesi gösteriliyor.</p>${remaining?`<button class="day-more" id="day-more-${key}" data-more-day="${key}">${Math.min(10,remaining)} haber daha göster · ${remaining} başlık kaldı</button>`:''}</details>`;
   }).join('');
 }
+$('articles').addEventListener('click',e=>{
+  const more=e.target.closest('[data-more-day]');
+  if(!more)return;
+  const key=more.dataset.moreDay;
+  dayLimits.set(key,(dayLimits.get(key)||10)+10);
+  render();
+  ($('day-more-'+key)||$('day-progress-'+key)).focus({preventScroll:true});
+});
 $('today').textContent=new Date().toLocaleDateString('tr-TR',{timeZone:'Europe/Istanbul',weekday:'long',day:'numeric',month:'long',year:'numeric'})+' · Yerel gündem takibi';
 for(const id of ['search','district','category','dedup','hide-weather'])$(id).addEventListener(id==='search'?'input':'change',render);
 $('period').addEventListener('change',load);
